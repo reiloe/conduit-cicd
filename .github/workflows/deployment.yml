@@ -171,7 +171,7 @@ jobs:
               command: >
                 sh -c "
                   python manage.py migrate --noinput &&
-                  python manage.py shell < /app/init_superuser.py
+                  python /app/init_superuser.py
                 "
               volumes:
                 - backend-db:/app/db
