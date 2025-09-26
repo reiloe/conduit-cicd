@@ -28,11 +28,7 @@ services:
     restart: "no"
     env_file: .env
     command: >
-      sh -c "python manage.py migrate --noinput && \
-             DJANGO_SUPERUSER_PASSWORD=\"${DJANGO_SU_PASSWORD}\" \
-             python manage.py createsuperuser --noinput \
-             --username \"${DJANGO_SU_NAME}\" --email \"${DJANGO_SU_EMAIL}\" \
-             || echo 'superuser exists or create returned non-zero (ignored)'"
+      sh -c "python manage.py migrate --noinput && DJANGO_SUPERUSER_PASSWORD=\"${DJANGO_SU_PASSWORD}\" python manage.py createsuperuser --username \"${DJANGO_SU_NAME}\" --email \"${DJANGO_SU_EMAIL}\" --noinput"
     volumes:
       - backend-db:/app/db
     pull_policy: always
