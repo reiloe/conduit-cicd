@@ -20,14 +20,13 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         service: [frontend, backend]
     
     outputs:
       tag: ${{ steps.vars.outputs.tag }}
-      extra_tag: ${{ steps.vars.outputs.extra_tag }}
 
     steps:
       - name: Checkout code
@@ -44,49 +43,34 @@ jobs:
       - name: Set image tag
         id: vars
         run: |
-          if [[ "${GITHUB_REF}" == refs/heads/main ]]; then
-            echo "tag=latest" >> $GITHUB_OUTPUT
-            echo "extra_tag=$(date +'%Y-%m-%d-%H-%M')" >> $GITHUB_OUTPUT
-          elif [[ "${GITHUB_REF}" == refs/heads/develop ]]; then
-            echo "tag=develop-latest" >> $GITHUB_OUTPUT
-            echo "extra_tag=develop-$(date +'%Y-%m-%d-%H-%M')" >> $GITHUB_OUTPUT
-          elif [[ "${GITHUB_REF}" == refs/heads/feature/* ]]; then
-            FEATURE_NAME=$(echo ${GITHUB_REF#refs/heads/feature/} | tr '/' '-')
-            echo "tag=${FEATURE_NAME}" >> $GITHUB_OUTPUT
-            echo "extra_tag=${FEATURE_NAME}-$(date +'%Y-%m-%d-%H-%M')" >> $GITHUB_OUTPUT
-          elif [[ "${GITHUB_REF}" == refs/heads/release/* ]]; then
+          BRANCH_NAME=$(echo "${GITHUB_REF#refs/heads/}" | tr '/' '-')
+
+          if [[ "${GITHUB_REF}" == refs/heads/release/* ]]; then
             RELEASE_NAME=${GITHUB_REF#refs/heads/release/}
             echo "tag=v${RELEASE_NAME}" >> $GITHUB_OUTPUT
-            echo "extra_tag=v${RELEASE_NAME}-$(date +'%Y-%m-%d-%H-%M')" >> $GITHUB_OUTPUT
+          else
+            TIMESTAMP=$(date +'%Y-%m-%d-%H-%M')
+            echo "tag=${BRANCH_NAME}-${TIMESTAMP}" >> $GITHUB_OUTPUT
           fi
-      
-      - name: Check whoami and token
-        run: |
-          echo "Actor: ${{ github.actor }}"
-          echo "Token available? ${{ secrets.GITHUB_TOKEN != '' }}"
-          
+
       - name: Build and push Docker image
         if: github.event_name != 'pull_request'
         run: |
           IMAGE=ghcr.io/${{ github.repository }}/${{ matrix.service }}
           TAG=${{ steps.vars.outputs.tag }}
-          EXTRA_TAG=${{ steps.vars.outputs.extra_tag }}
 
           echo "🚀 Building $IMAGE:$TAG"
 
-          # Build immer neu
-          docker build --pull --no-cache -t $IMAGE:$TAG ./conduit-${{ matrix.service }}
+          # Build only releases without cache
+          if [[ "${GITHUB_REF}" == refs/heads/release/* ]]; then
+            docker build --pull --no-cache -t $IMAGE:$TAG ./conduit-${{ matrix.service }}
+          else
+            docker build --pull -t $IMAGE:$TAG ./conduit-${{ matrix.service }}
+          fi
 
-          # Push main tag
+          # Push tag
           docker push $IMAGE:$TAG
 
-          # Push extra tag (für Deployment)
-          if [ -n "$EXTRA_TAG" ]; then
-            echo "📌 Also tagging as $EXTRA_TAG"
-            docker tag $IMAGE:$TAG $IMAGE:$EXTRA_TAG
-            docker push $IMAGE:$EXTRA_TAG
-          fi
-          
       - name: Build Docker image (PR only)
         if: github.event_name == 'pull_request'
         run: |
@@ -102,7 +86,7 @@ jobs:
           docker run --rm $IMAGE /bin/sh -c "echo ✅ Container for ${{ matrix.service }} built successfully"
 
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: build
     if: github.event_name != 'pull_request' && (
       github.ref == 'refs/heads/main' ||
@@ -118,20 +102,45 @@ jobs:
           echo "${{ secrets.DEPLOYMENT_KEY }}" > ~/.ssh/deployment_key
           chmod 600 ~/.ssh/deployment_key
 
-      - name: Ensure server is in known_hosts
+      - name: Ensure server is in known_hosts (with fingerprint check)
+        env:
+          DEPLOYMENT_HOST: ${{ secrets.DEPLOYMENT_HOST }}
+          EXPECTED_FP: ${{ secrets.DEPLOYMENT_HOST_FINGERPRINT }}
         run: |
-          if ! ssh-keygen -F "${{ secrets.DEPLOYMENT_HOST }}" > /dev/null; then
-              echo "Adding server fingerprint for ${{ secrets.DEPLOYMENT_HOST }}"
-              ssh-keyscan -H "${{ secrets.DEPLOYMENT_HOST }}" >> ~/.ssh/known_hosts
+          echo "🔍 Checking SSH-Fingerprint for $DEPLOYMENT_HOST"
+
+          # Check whether host is already in known_hosts
+          if ssh-keygen -F "$DEPLOYMENT_HOST" > /dev/null; then
+            echo "ℹ️ Host already in known_hosts – verify fingerprint..."
+
+            KNOWN_FP=$(ssh-keygen -lf ~/.ssh/known_hosts | awk '/ED25519/ {print $2}')
+
+            if [ "$KNOWN_FP" != "$EXPECTED_FP" ]; then
+              echo "❌ Fingerprint mismatch in known_hosts!"
+              echo "   Erwartet: $EXPECTED_FP"
+              echo "   Gefunden: $KNOWN_FP"
+              exit 1
+            fi
+
+            echo "✅ Fingerprint matches."
           else
-              echo "Server already in known_hosts"
+            echo "⚠️ Host NOT in known_hosts – scan fingerprint..."
+            ACTUAL_FP=$(ssh-keyscan -t ed25519 "$DEPLOYMENT_HOST" 2>/dev/null | ssh-keygen -lf - | awk '{print $2}')
+
+            if [ "$ACTUAL_FP" != "$EXPECTED_FP" ]; then
+              echo "❌ Fingerprint mismatch!"
+              exit 1
+            fi
+
+            echo "✅ Fingerprint verified – add to known_hosts..."
+            ssh-keyscan -H -t ed25519 "$DEPLOYMENT_HOST" >> ~/.ssh/known_hosts
+            chmod 644 ~/.ssh/known_hosts
           fi
 
       - name: Create temporary env file
         run: |
           cat > .env.deploy <<EOL
           TAG=${{ needs.build.outputs.tag }}
-          EXTRA_TAG=${{ needs.build.outputs.extra_tag }}
           GITHUB_REPOSITORY=${{ github.repository }}
           FRONTEND_PORT=${{ secrets.FRONTEND_PORT }}
           BACKEND_PORT=${{ secrets.BACKEND_PORT }}
@@ -152,6 +161,11 @@ jobs:
 
       - name: Deploy to server via SSH
         run: |
+          # Copy Compose-File to Server
+          scp -i ~/.ssh/deployment_key docker-compose.deployment.yml \
+          ${{ secrets.DEPLOYMENT_USER }}@${{ secrets.DEPLOYMENT_HOST }}:/tmp/docker-compose.deployment.yml
+
+          # Perform deployment on the server
           ssh -i ~/.ssh/deployment_key ${{ secrets.DEPLOYMENT_USER }}@${{ secrets.DEPLOYMENT_HOST }} bash -s <<'EOF'
           set -e
 
@@ -160,53 +174,11 @@ jobs:
           PROJECT_DIR=~/deployments/${GITHUB_REPOSITORY}
           mkdir -p $PROJECT_DIR
 
-          # Create docker-compose.yml on server
-          cat > $PROJECT_DIR/docker-compose.yml <<EOL
-          services:
-            frontend:
-              image: ghcr.io/${GITHUB_REPOSITORY}/frontend:${EXTRA_TAG}
-              restart: on-failure
-              env_file: .env
-              ports:
-                - "\${FRONTEND_PORT}:80"
-              depends_on:
-                - backend
-              pull_policy: always
-
-            backend:
-              image: ghcr.io/${GITHUB_REPOSITORY}/backend:${EXTRA_TAG}
-              restart: on-failure
-              env_file: .env
-              ports:
-                - "\${BACKEND_PORT}:\${BACKEND_PORT}"
-              volumes:
-                - backend-db:/app/db
-              depends_on:
-                - backend-init
-              pull_policy: always
-
-            backend-init:
-              image: ghcr.io/${GITHUB_REPOSITORY}/backend:${EXTRA_TAG}
-              restart: "no"
-              env_file: .env
-              command: >
-                sh -c "python manage.py migrate --noinput && \
-                       DJANGO_SUPERUSER_PASSWORD=\"${DJANGO_SU_PASSWORD}\" \
-                       python manage.py createsuperuser --noinput \
-                       --username \"${DJANGO_SU_NAME}\" --email \"${DJANGO_SU_EMAIL}\" \
-                       || echo 'superuser exists or create returned non-zero (ignored)'"
-              volumes:
-                - backend-db:/app/db
-              pull_policy: always
-
-          volumes:
-            backend-db:
-          EOL
-
-          # Create .env file on server
+          # Copy files to deployment folder
           cp /tmp/.env.deploy $PROJECT_DIR/.env
+          cp /tmp/docker-compose.deployment.yml $PROJECT_DIR/docker-compose.yml
 
-          # Deploy containers (immer pullen!)
+          # Deploy containers (always pull!)
           cd $PROJECT_DIR
           docker compose pull
           docker compose up -d --force-recreate

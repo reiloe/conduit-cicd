@@ -44,6 +44,7 @@ conduit-cicd/
 │   └── workflows/
 │       └── deployment.yml         # GitHub Actions workflow (build & deploy)
 ├── compose.yml                    # docker-compose used for local testing
+├── docker-compose.deployment.yml  # docker-compose used on server
 ├── conduit-frontend/
 │   ├── Dockerfile                 # frontend multi-stage build + nginx
 │   ├── default.conf               # nginx site configuration
@@ -107,18 +108,19 @@ All runtime values come from an `.env` file used by `docker compose`. For local 
 
 Important variables (examples):
 
-| Variable        | Description                            | Example              |
-|-----------------|----------------------------------------|----------------------|
-| FRONTEND_PORT   | Port exposed by Angular frontend        | 8282                 |
-| BACKEND_PORT    | Port exposed by Django backend          | 8000                 |
-| DJANGO_SU_NAME  | Initial Django superuser username       | admin                |
-| DJANGO_SU_EMAIL | Initial Django superuser email          | admin@example.com    |
-| DJANGO_SU_PASSWORD | Initial Django superuser password    | secret               |
-| ALLOWED_HOSTS   | Django allowed hosts (comma separated)  | 127.0.0.1,localhost  |
-| CORS_ORIGINS    | Allowed frontend origins                | http://localhost:8282|
-| SECRET_KEY      | Django secret key                       |                      |
-| DEBUG           | Debug mode (True/False)                 | True                 |
-| SERVERIP        | IP/Hostname of vServer                  | localhost            |
+| Variable        | Description                            | Example               |
+|-----------------|----------------------------------------|-----------------------|
+| FRONTEND_PORT   | Port exposed by Angular frontend       | 8282                  |
+| BACKEND_PORT    | Port exposed by Django backend         | 8000                  |
+| DJANGO_SU_NAME  | Initial Django superuser username      | admin                 |
+| DJANGO_SU_EMAIL | Initial Django superuser email         | admin@example.com     |
+| DJANGO_SU_PASSWORD | Initial Django superuser password   | secret                |
+| ALLOWED_HOSTS   | Django allowed hosts (comma separated) | 127.0.0.1,localhost   |
+| CORS_ORIGINS    | Allowed frontend origins               | http://localhost:8282 |
+| SECRET_KEY      | Django secret key                      | +3@v7$v1f8yt0!s)3     |
+| DEBUG           | Debug mode (True/False)                | True                  |
+| SERVERIP        | IP/Hostname of vServer                 | 1.2.3.4               |
+| CORS_ORIGINS    | IP/Hostnames of vServer                | 1.2.3.4               |
 
 Example:
 
@@ -133,6 +135,7 @@ CORS_ORIGINS=http://localhost:8282
 SECRET_KEY='replace-with-a-random-secret'
 DEBUG=True
 SERVERIP=localhost
+CORS_ORIGINS=localhost,http://localhost:8282
 ```
 
 The GitHub Actions deployment will generate an `.env` on the remote server populated from GitHub Secrets (names are listed in the “Secrets required” section).
@@ -198,26 +201,24 @@ A produced example workflow `deployment.yml` does the following (high level):
     - checkout code
     - log in to GHCR (`docker/login-action@v2`)
     - compute a tag based on branch:
-        - `main` → `latest` and `YYYY-MM-DD-HH-MM` (extra_tag)
-        - `develop` → `develop-latest` and `develop-YYYY-MM-DD-HH-MM`
+        - `main` → `main-YYYY-MM-DD-HH-MM`
+        - `develop` → `develop-YYYY-MM-DD-HH-MM`
         - `feature/xyz` → `xyz-YYYY-MM-DD-HH-MM`
-        - `release/1.2.3` → `v1.2.3` (optionally plus timestamp)
-    - `docker build --pull --no-cache` and `docker push` (both tags if extra_tag present)
+        - `release/1.2.3` → `v1.2.3`
 
 - `deploy` job (runs after build):
     - uses SSH key (secret) to connect to server
     - creates `~/deployments/<repo-name>/docker-compose.yml` and `.env` from secrets and the computed tag(s)
     - runs `docker compose pull` and `docker compose up -d --force-recreate`
-    - creates `~/scripts/rollback.sh` (optional) for manual rollback operations
 
 ### Tagging rules
 
-- `main`: tag `latest` and `YYYY-MM-DD-HH-MM` (keeps `latest` pointer for convenience)
-- `develop`: tag `develop-latest` and `develop-YYYY-MM-DD-HH-MM`
-- `feature/*`: tag `feature-name-YYYY-MM-DD-HH-MM` (feature name derived from branch name)
+- `main`: tag `main-YYYY-MM-DD-HH-MM` 
+- `develop`: tag `develop-YYYY-MM-DD-HH-MM`
+- `feature/*`: tag `feature-name-YYYY-MM-DD-HH-MM` 
 - `release/*`: tag `vX.Y.Z` (semantic release tag)
 
-This lets you deploy feature-specific images to test environments and keep `main` and `develop` trackable by both `-latest` and time-based tags.
+This lets you deploy feature-specific images to test environments and keep `main` and `develop` trackable by time-based tags.
 
 ### Secrets required in GitHub
 
@@ -230,6 +231,7 @@ Put these keys into your repository Secrets (or Environment secrets if you prefe
 - `DJANGO_SU_NAME`, `DJANGO_SU_EMAIL`, `DJANGO_SU_PASSWORD` — initial superuser creation
 - `SECRET_KEY`, `DEBUG`, `ALLOWED_HOSTS` — Django settings
 - `CORS_ORIGINS` — comma-separated allowed origins for Django
+- `DEPLOYMENT_HOST_FINGERPRINT` - The fingerprint of the deployment server
 - Optionally `GHCR_TOKEN` if you want to use a personal access token with `write:packages` instead of `GITHUB_TOKEN` for GHCR pushes (useful for `act` local testing)
 
 > Do not store secrets in the repository. The workflow uses these secrets to generate `.env` on the server at deploy time.
@@ -237,8 +239,8 @@ Put these keys into your repository Secrets (or Environment secrets if you prefe
 ### How deploy works (high level)
 
 1. Build images and push to GHCR
-2. SSH to the server and upload a temporary `.env.deploy` file containing the image tag and environment variables
-3. On the server: create `~/deployments/<repo>/docker-compose.yml` referencing the pushed images with the computed tag (often the timestamp tag is used for the deployed image)
+2. SSH to the server and upload a temporary `.env.deploy` and `docker-compose.deployment.yml` file
+3. On the server: Copy the temp `docker-compose.deployment.yml` into `~/deployments/<repo>/docker-compose.yml` referencing the pushed images with the computed tag
 4. Copy the temp `.env.deploy` into `~/deployments/<repo>/.env`
 5. Run `docker compose pull` and `docker compose up -d --force-recreate` so the server pulls the new image and restarts containers
 
@@ -272,6 +274,7 @@ flowchart LR
 
 **2) SSH failures**
 
+- Ensure the private key in `DEPLOYMENT_HOST_FINGERPRINT` matches the fingerprint of the server and is in GitHub secrets.
 - Ensure the private key in `DEPLOYMENT_KEY` matches the public key in the remote user's `~/.ssh/authorized_keys`.
 - Ensure `deploymentuser` exists and is in the `docker` group so it can run Docker without sudo (or the workflow uses `sudo` appropriately).
 
