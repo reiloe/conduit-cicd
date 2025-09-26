@@ -1,3 +1,4 @@
+# init_superuser.py
 import os
 import django
 
@@ -12,22 +13,12 @@ name = os.environ.get("DJANGO_SU_NAME")
 email = os.environ.get("DJANGO_SU_EMAIL")
 password = os.environ.get("DJANGO_SU_PASSWORD")
 
-print(">>> DEBUG ENV:")
-print("   DJANGO_SU_NAME =", name)
-print("   DJANGO_SU_EMAIL =", email)
-print("   DJANGO_SU_PASSWORD =", password)
+print(">>> DEBUG ENV:", name, email, password)
 
 User = get_user_model()
 
 if not User.objects.filter(username=name).exists():
-    try:
-        User.objects.create_superuser(
-            username=name,
-            email=email,
-            password=password
-        )
-        print("✅ Superuser created:", name)
-    except Exception as e:
-        print("❌ ERROR creating superuser:", e)
+    user = User.objects.create_superuser(username=name, email=email, password=password or "changeme123")
+    print("✅ Superuser created:", name)
 else:
     print("ℹ️ Superuser already exists:", name)
