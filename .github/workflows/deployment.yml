@@ -137,6 +137,9 @@ jobs:
             chmod 644 ~/.ssh/known_hosts
           fi
 
+      - name: Checkout code
+        uses: actions/checkout@v3
+        
       - name: Create temporary env file
         run: |
           cat > .env.deploy <<EOL
