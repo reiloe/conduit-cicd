@@ -170,20 +170,11 @@ backend-init:
   restart: "no"
   env_file: .env
   command: >
-    sh -c "
-      python manage.py migrate --noinput &&
-      python manage.py shell -c \"
-from django.contrib.auth import get_user_model
-import os
-User = get_user_model()
-if not User.objects.filter(username=os.environ['DJANGO_SU_NAME']).exists():
-  User.objects.create_superuser(
-    os.environ['DJANGO_SU_NAME'],
-    os.environ['DJANGO_SU_EMAIL'],
-    os.environ['DJANGO_SU_PASSWORD']
-  )
-\"
-"
+    sh -c "python manage.py migrate --noinput && \
+           DJANGO_SUPERUSER_PASSWORD=\"${DJANGO_SU_PASSWORD}\" \
+           python manage.py createsuperuser --noinput \
+           --username \"${DJANGO_SU_NAME}\" --email \"${DJANGO_SU_EMAIL}\" \
+           || echo 'superuser exists or create returned non-zero (ignored)'"
   volumes:
     - backend-db:/app/db
 ```
