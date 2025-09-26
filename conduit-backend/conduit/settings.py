@@ -24,17 +24,9 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SECRET_KEY = os.environ['SECRET_KEY'] if 'SECRET_KEY' in os.environ else 'insecure-default-key-change-me'
 
 # SECURITY WARNING: don't run with debug turned on in production!
-# DEBUG – Default False
-if 'DEBUG' in os.environ:
-    DEBUG = os.environ['DEBUG'].lower() in ('1', 'true', 'yes')
-else:
-    DEBUG = False
+DEBUG = os.environ['DEBUG']
 
-# ALLOWED_HOSTS – Default ["localhost"]
-if 'ALLOWED_HOSTS' in os.environ and os.environ['ALLOWED_HOSTS'].strip():
-    ALLOWED_HOSTS = os.environ['ALLOWED_HOSTS'].split(',')
-else:
-    ALLOWED_HOSTS = ['localhost']
+ALLOWED_HOSTS = os.environ['ALLOWED_HOSTS'].split(',')
 
 # Application definition
 
@@ -138,11 +130,7 @@ USE_TZ = True
 STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 STATIC_URL = '/static/'
 
-# CORS_ORIGINS – Default ["localhost"]
-if 'CORS_ORIGINS' in os.environ and os.environ['CORS_ORIGINS'].strip():
-    CORS_ORIGINS = os.environ['CORS_ORIGINS'].split(',')
-else:
-    CORS_ORIGINS = ['localhost','http://localhost']
+CORS_ORIGINS = os.environ['CORS_ORIGINS'].split(',')
 
 CORS_ORIGIN_WHITELIST = ()
 
