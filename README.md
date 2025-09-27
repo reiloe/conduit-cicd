@@ -1,5 +1,7 @@
 # Conduit CI/CD
 
+This project involves creating a CI/CD workflow (with GitHub Actions) in GitHub, including deployment and execution of a containerized application on a remote server.
+
 ## Table of Contents
 
 - [Project description](#project-description)
