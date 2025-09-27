@@ -1,0 +1,188 @@
+name: Deployment vServer
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - 'feature/**'
+      - 'release/**'
+  
+  pull_request:
+    branches:
+      - main
+      - develop
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        service: [frontend, backend]
+    
+    outputs:
+      tag: ${{ steps.vars.outputs.tag }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set image tag
+        id: vars
+        run: |
+          BRANCH_NAME=$(echo "${GITHUB_REF#refs/heads/}" | tr '/' '-')
+
+          if [[ "${GITHUB_REF}" == refs/heads/release/* ]]; then
+            RELEASE_NAME=${GITHUB_REF#refs/heads/release/}
+            echo "tag=v${RELEASE_NAME}" >> $GITHUB_OUTPUT
+          else
+            TIMESTAMP=$(date +'%Y-%m-%d-%H-%M')
+            echo "tag=${BRANCH_NAME}-${TIMESTAMP}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build and push Docker image
+        if: github.event_name != 'pull_request'
+        run: |
+          IMAGE=ghcr.io/${{ github.repository }}/${{ matrix.service }}
+          TAG=${{ steps.vars.outputs.tag }}
+
+          echo "🚀 Building $IMAGE:$TAG"
+
+          # Build only releases without cache
+          if [[ "${GITHUB_REF}" == refs/heads/release/* ]]; then
+            docker build --pull --no-cache -t $IMAGE:$TAG ./conduit-${{ matrix.service }}
+          else
+            docker build --pull -t $IMAGE:$TAG ./conduit-${{ matrix.service }}
+          fi
+
+          # Push tag
+          docker push $IMAGE:$TAG
+
+      - name: Build Docker image (PR only)
+        if: github.event_name == 'pull_request'
+        run: |
+          IMAGE=test/${{ matrix.service }}
+          echo "🔨 Building PR image: $IMAGE"
+          docker build --pull --no-cache -t $IMAGE ./conduit-${{ matrix.service }}
+
+      - name: Smoke test PR image
+        if: github.event_name == 'pull_request'
+        run: |
+          IMAGE=test/${{ matrix.service }}
+          echo "🚀 Running smoke test for $IMAGE"
+          docker run --rm $IMAGE /bin/sh -c "echo ✅ Container for ${{ matrix.service }} built successfully"
+
+  deploy:
+    runs-on: ubuntu-24.04
+    needs: build
+    if: github.event_name != 'pull_request' && (
+      github.ref == 'refs/heads/main' ||
+      github.ref == 'refs/heads/develop' ||
+      startsWith(github.ref, 'refs/heads/feature/') ||
+      startsWith(github.ref, 'refs/heads/release/')
+      )
+    steps:
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          touch ~/.ssh/known_hosts
+          echo "${{ secrets.DEPLOYMENT_KEY }}" > ~/.ssh/deployment_key
+          chmod 600 ~/.ssh/deployment_key
+
+      - name: Ensure server is in known_hosts (with fingerprint check)
+        env:
+          DEPLOYMENT_HOST: ${{ secrets.DEPLOYMENT_HOST }}
+          EXPECTED_FP: ${{ secrets.DEPLOYMENT_HOST_FINGERPRINT }}
+        run: |
+          echo "🔍 Checking SSH-Fingerprint for $DEPLOYMENT_HOST"
+
+          # Check whether host is already in known_hosts
+          if ssh-keygen -F "$DEPLOYMENT_HOST" > /dev/null; then
+            echo "ℹ️ Host already in known_hosts – verify fingerprint..."
+
+            KNOWN_FP=$(ssh-keygen -lf ~/.ssh/known_hosts | awk '/ED25519/ {print $2}')
+
+            if [ "$KNOWN_FP" != "$EXPECTED_FP" ]; then
+              echo "❌ Fingerprint mismatch in known_hosts!"
+              echo "   Erwartet: $EXPECTED_FP"
+              echo "   Gefunden: $KNOWN_FP"
+              exit 1
+            fi
+
+            echo "✅ Fingerprint matches."
+          else
+            echo "⚠️ Host NOT in known_hosts – scan fingerprint..."
+            ACTUAL_FP=$(ssh-keyscan -t ed25519 "$DEPLOYMENT_HOST" 2>/dev/null | ssh-keygen -lf - | awk '{print $2}')
+
+            if [ "$ACTUAL_FP" != "$EXPECTED_FP" ]; then
+              echo "❌ Fingerprint mismatch!"
+              exit 1
+            fi
+
+            echo "✅ Fingerprint verified – add to known_hosts..."
+            ssh-keyscan -H -t ed25519 "$DEPLOYMENT_HOST" >> ~/.ssh/known_hosts
+            chmod 644 ~/.ssh/known_hosts
+          fi
+
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Create temporary env file
+        run: |
+          cat > .env.deploy <<EOL
+          TAG=${{ needs.build.outputs.tag }}
+          GITHUB_REPOSITORY=${{ github.repository }}
+          FRONTEND_PORT=${{ secrets.FRONTEND_PORT }}
+          BACKEND_PORT=${{ secrets.BACKEND_PORT }}
+          DJANGO_SU_NAME=${{ secrets.DJANGO_SU_NAME }}
+          DJANGO_SU_EMAIL=${{ secrets.DJANGO_SU_EMAIL }}
+          DJANGO_SU_PASSWORD=${{ secrets.DJANGO_SU_PASSWORD }}
+          ALLOWED_HOSTS=${{ secrets.SERVERIP }}
+          SECRET_KEY=${{ secrets.SECRET_KEY }}
+          DEBUG=${{ secrets.DEBUG }}
+          SERVERIP=${{ secrets.SERVERIP }}
+          CORS_ORIGINS=${{ secrets.CORS_ORIGINS }}
+          EOL
+
+      - name: Copy env file to server
+        run: |
+          scp -i ~/.ssh/deployment_key .env.deploy \
+          ${{ secrets.DEPLOYMENT_USER }}@${{ secrets.DEPLOYMENT_HOST }}:/tmp/.env.deploy
+
+      - name: Deploy to server via SSH
+        run: |
+          # Copy Compose-File to Server
+          scp -i ~/.ssh/deployment_key docker-compose.deployment.yml \
+          ${{ secrets.DEPLOYMENT_USER }}@${{ secrets.DEPLOYMENT_HOST }}:/tmp/docker-compose.deployment.yml
+
+          # Perform deployment on the server
+          ssh -i ~/.ssh/deployment_key ${{ secrets.DEPLOYMENT_USER }}@${{ secrets.DEPLOYMENT_HOST }} bash -s <<'EOF'
+          set -e
+
+          export $(grep -v '^#' /tmp/.env.deploy | xargs)
+
+          PROJECT_DIR=~/deployments/${GITHUB_REPOSITORY}
+          mkdir -p $PROJECT_DIR
+
+          # Copy files to deployment folder
+          cp /tmp/.env.deploy $PROJECT_DIR/.env
+          cp /tmp/docker-compose.deployment.yml $PROJECT_DIR/docker-compose.yml
+
+          # Deploy containers (always pull!)
+          cd $PROJECT_DIR
+          docker compose pull
+          docker compose up -d --force-recreate
+          EOF
